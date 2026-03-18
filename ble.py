@@ -1,99 +1,93 @@
 import asyncio
+import json
+from bleak import BleakClient
 import struct
-from bleak import BleakClient, BleakScanner
 
-# 1. Update these to match your Arduino code
-TARGET_NAME = "FeatherSS"
-# On macOS, use the UUID address found during a scan. On Windows/Linux, use MAC address.
+# --- YOUR SETTINGS ---
 ADDRESS = "C012C31E-9321-BA99-12E1-F6838C322582" 
-
-SERVICE_UUID = "00001234-0000-1000-8000-00805f9b34fb"
 CHARACTERISTIC_UUID = "00005678-0000-1000-8000-00805f9b34fb"
+WRITE_UUID  = "00009ABC-0000-1000-8000-00805f9b34fb"
 
-# 2. Updated notification handler for binary data
-def notification_handler(characteristic, data):
-    """
-    Unpacks the 28-byte packet:
-    6 Floats (4 bytes each) + 1 Uint32 (4 bytes)
-    Format '<ffffffI' means: Little-endian, 6 floats, 1 unsigned int
-    """
-    print(f"Received {len(data)} bytes")
-    try:
-        # Unpack the binary data
-        # f = float (4 bytes), I = unsigned int (4 bytes)
-        decoded_data = struct.unpack('<ffffffI', data)
-        
-        ax, ay, az = decoded_data[0:3]
-        gx, gy, gz = decoded_data[3:6]
-        timestamp  = decoded_data[6]
+SAMPLE_FORMAT = '<ffffffL'
+SAMPLE_SIZE = struct.calcsize(SAMPLE_FORMAT) # This will be 28
 
-        print(f"Time: {timestamp}us | Accel: {ax:.2f}, {ay:.2f}, {az:.2f} | Gyro: {gx:.2f}, {gy:.2f}, {gz:.2f}")
+data_points = []
+recording = False
+stop_event = None
+
+def notification_handler(sender, data):
+    global recording, data_points
     
-    except Exception as e:
-        print(f"Failed to unpack data: {e}")
+    # 1. Handle Control Signals (Text)
+    if len(data) < 10:
+        try:
+            msg = data.decode('utf-8').strip()
+            if msg == "START":
+                recording = True
+                data_points = []
+                print("--- Recording Started ---")
+                return
+            elif msg == "END":
+                recording = False
+                with open('data.json', 'w') as f:
+                    json.dump({"sensor_readings": data_points}, f)
+                print(f"--- Done! Saved {len(data_points)} total samples ---")
+                stop_event.set()
+                return
+        except UnicodeDecodeError:
+            pass
 
-async def run_ble_client():
-    print("Scanning for ServeSense...")
+    # 2. Handle Multi-Sample Binary Data
+    if recording:
+        # Determine how many 28-byte samples are in this specific packet
+        num_samples = len(data) // SAMPLE_SIZE
+        
+        if num_samples > 0:
+            for i in range(num_samples):
+                # Extract a 28-byte slice for one sample
+                start = i * SAMPLE_SIZE
+                end = start + SAMPLE_SIZE
+                sample_bytes = data[start:end]
+                
+                try:
+                    # Unpack this specific slice
+                    unpacked = struct.unpack(SAMPLE_FORMAT, sample_bytes)
+                    
+                    # Add to our main list (matching your original format)
+                    data_points.append(list(unpacked))
+                except Exception as e:
+                    print(f"Error unpacking sample {i}: {e}")
+            
+            print(f"Processed packet: {num_samples} samples added (Total: {len(data_points)})")
 
-    disconnect_event = asyncio.Event()
+async def main():
+    global stop_event
+    stop_event = asyncio.Event()
+    
+    async with BleakClient(ADDRESS) as client:
+        print(f"Connected to GATT Server: {client.is_connected}")
+        
+        # 1. Get both characteristics to check their specific properties
+        notify_char = client.services.get_characteristic(CHARACTERISTIC_UUID)
+        write_char = client.services.get_characteristic(WRITE_UUID)
 
-    def handle_disconnect(client):
-        print("Device disconnected unexpectedly.")
-        disconnect_event.set()
+        print(f"Notify Prop: {notify_char.properties}")
+        print(f"Write Prop: {write_char.properties}")
 
-    try:
-        # Prefer scanning by name first, since macOS uses a UUID-style address.
-        device = await BleakScanner.find_device_by_name(TARGET_NAME, timeout=10.0)
-
-        # Fallback to the known address if name-based discovery fails.
-        if device is None:
-            print("Name-based scan failed. Trying known address...")
-            device = await BleakScanner.find_device_by_address(ADDRESS, timeout=10.0)
-
-        if device is None:
-            print("Device not found. Check if Feather is powered on and advertising.")
+        if "notify" in notify_char.properties:
+            await client.start_notify(CHARACTERISTIC_UUID, notification_handler)
+        else:
+            print("ERROR: Notify UUID does not support 'Notify'.")
             return
 
-        print(f"Attempting to connect to {device.address}...")
+        # 2. Use the WRITE characteristic's properties for the 'g' command
+        # Force response=False to prevent the handshake hang
+        print(f"Sending 'g' to {WRITE_UUID} (without response)...")
+        
+        await client.write_gatt_char(WRITE_UUID, b'g', response=False)
 
-        async with BleakClient(
-            device,
-            disconnected_callback=handle_disconnect,
-            services=[SERVICE_UUID],
-        ) as client:
-            print("Successfully connected!")
-
-            # Give the BLE stack a brief moment to settle before enabling notifications.
-            await asyncio.sleep(0.5)
-
-            await client.start_notify(CHARACTERISTIC_UUID, notification_handler)
-            print("Listening for data... Press Ctrl+C to stop.")
-
-            try:
-                await disconnect_event.wait()
-            finally:
-                if client.is_connected:
-                    try:
-                        await client.stop_notify(CHARACTERISTIC_UUID)
-                    except Exception as e:
-                        print(f"Warning: failed to stop notifications cleanly: {e}")
-
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        print(f"Connection failed: {e}")
-
-async def discover():
-    print("Scanning for ServeSense advertising data...")
-    devices = await BleakScanner.discover(return_adv=True)
-    for d, adv in devices.values():
-        if d.name == "ServeSense" or d.address == "C012C31E-9321-BA99-12E1-F6838C322582":
-            print(f"\nFound target: {d.name} [{d.address}]")
-            print(f"Advertised Services: {adv.service_uuids}")
+        print("Command sent! Waiting for notification handler to trigger...")
+        await stop_event.wait()
 
 if __name__ == "__main__":
-    # asyncio.run(discover()) #Used to discover the device
-    try:
-        asyncio.run(run_ble_client())
-    except KeyboardInterrupt:
-        print("\nDisconnected.")
+    asyncio.run(main())

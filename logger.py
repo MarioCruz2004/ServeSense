@@ -4,7 +4,8 @@ import time
 
 # 1. Connect to the Feather
 ser = serial.Serial('/dev/cu.usbmodem1101', 115200, timeout=1) 
-time.sleep(5) # Give the Feather a moment to reset after connecting
+print("3 seconds until start")
+time.sleep(3) # Give the Feather a moment to reset after connecting
 
 # 2. Tell the Feather to start
 print("Sending 'g' trigger...")
