@@ -10,7 +10,8 @@ BLECharacteristic rxCharacteristic = BLECharacteristic(0x9ABC); // For Commands
 
 const int BUTTON_PIN = 7; // D7 is the User Button which we'll be using for calibration
 const int INTERRUPT_PIN = 11;
-volatile bool triggerCalibration = false;
+volatile bool triggerGyroCalibration = false;
+volatile bool triggerAccelCalibration = false;
 volatile bool triggerRead = false;
 volatile bool triggerSend = false;
 unsigned long lastInterruptTime = 0;
@@ -60,7 +61,7 @@ void setupBLE(){
   rxCharacteristic.setPermission(SECMODE_OPEN, SECMODE_OPEN); // Open for writing
   rxCharacteristic.setFixedLen(1); // Since we only send 'g'
   
-  // 3. Optional: Add a callback to react to the write immediately
+  //Add a callback to react to the write immediately
   rxCharacteristic.setWriteCallback(receive_callback);
   
   rxCharacteristic.begin();
@@ -111,9 +112,14 @@ void startAdv(void) {
 uint8_t testValue = 0;
 
 void loop() {
-  if (triggerCalibration) {
+  if (triggerGyroCalibration) {
     runCalibration();
-    triggerCalibration = false; // Reset the flag
+    triggerGyroCalibration = false; // Reset the flag
+  }
+  if (triggerAccelCalibration){
+    //runAccelCalibration();
+    Serial.println("Got to calibrate johnson step");
+    triggerAccelCalibration = false;
   }
   if (triggerSend){
       if (Bluefruit.connected()) {
@@ -193,7 +199,9 @@ void sendData(){
     txCharacteristic.notify((uint8_t*)endMsg, strlen(endMsg));
   }
   return;
+
 }
+
 
 void connect_callback(uint16_t conn_handle) {
   
@@ -246,12 +254,17 @@ void cccd_callback(uint16_t conn_hdl, BLECharacteristic* chr, uint16_t cccd_valu
 }
 
 void runCalibration() {
-  Serial.println("!!! STARTING CALIBRATION - KEEP SENSOR STILL !!!");
-
-  IMU.begin(); 
-  
-  Serial.println("Calibration Complete.");
+  Serial.println("!!! STARTING GYROSCOPE CALIBRATION - KEEP SENSOR STILL !!!");
+  int status = IMU.calibrateGyro();
+  Serial.println("GYROSCOPE Calibration Complete.");
 }
+
+void runAccelCalibration(){
+  Serial.println("!!! STARTING ACCELEROMETER CALIBRATION - KEEP SENSOR STILL !!!");
+  int status = IMU.calibrateAccel();
+  Serial.println("Accelerometer Calibration Complete.");
+}
+ 
 
 // The Interrupt Service Routine (ISR) should be short
 void handleButtonPress() {
@@ -259,7 +272,7 @@ void handleButtonPress() {
   
   // Software Debouncing: ignore interrupts if they happen too fast (within 200ms)
   if (interruptTime - lastInterruptTime > 200) {
-    triggerCalibration = true;
+    triggerGyroCalibration = true;
   }
   lastInterruptTime = interruptTime;
 }
@@ -268,24 +281,30 @@ void handleSPIinterrupt(){
   triggerRead = true;
 }
 
-// The Callback Function
-void onWriteCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
-  // 'data' is an array of bytes sent from your laptop
-  // 'len' is how many bytes were sent
-  
+void receive_callback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
+  // Used to be simply to toggle triggerSend to true;
   if (len > 0) {
-    uint8_t command = data[0]; // Look at the first byte
+    uint8_t command = data[0]; // Read the first byte sent
     
-    if (command == 1) {
-      Serial.println("Remote command: Start Calibration!");
-      triggerCalibration = true; // Set the flag we used for the button
-    } 
-    else if (command == 0) {
-      Serial.println("Remote command: Stop Streaming!");
-      // Logic to stop streaming
+    switch (command) {
+      case 'g': // Instruction 1
+        Serial.println("Remote Command: send swing data!");
+        triggerSend = true; 
+        break;
+      case 'c': // Instruction 2
+        Serial.println("Remote Command: gyroscope calibration!");
+        triggerGyroCalibration = true;
+        break;
+      case 'a': // Instruction 3
+        Serial.println("Remote Command: accelerometer calibration!");
+        triggerAccelCalibration = true;
+        break;
+      case 'M': // Instruction 4
+        //resetSystem();
+        break;
+      default:
+        Serial.println("Unknown command received");
+        break;
     }
   }
-}
-void receive_callback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
-  triggerSend = true;
 }
